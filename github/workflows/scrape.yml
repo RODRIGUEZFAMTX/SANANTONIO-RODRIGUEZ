@@ -1,0 +1,88 @@
+name: scrape-bexar-leads
+
+on:
+  schedule:
+    - cron: "0 7 * * *"       # 07:00 UTC = ~02:00 CT
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Lookback window in days"
+        default: "7"
+        required: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "scraper-${{ github.ref }}"
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    outputs:
+      total: ${{ steps.summary.outputs.total }}
+      healthy: ${{ steps.summary.outputs.healthy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r scraper/requirements.txt
+
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run scraper
+        env:
+          LOG_LEVEL: INFO
+        run: |
+          python scraper/fetch.py --days ${{ github.event.inputs.days || '7' }}
+
+      - name: Summarize
+        id: summary
+        run: |
+          TOTAL=$(python -c "import json,sys; d=json.load(open('data/records.json')); print(d.get('total',0))" 2>/dev/null || echo 0)
+          HEALTHY=$(python -c "import json; d=json.load(open('data/last_run.log')); print(str(d.get('healthy',False)).lower())" 2>/dev/null || echo "false")
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "healthy=$HEALTHY" >> "$GITHUB_OUTPUT"
+          echo "::notice::Total leads: $TOTAL | Healthy: $HEALTHY"
+
+      - name: Commit data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dashboard/records.json data/records.json data/leads_ghl.csv data/last_run.log 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes."
+          else
+            git commit -m "data: update leads — $(date -u +%Y-%m-%d) — ${{ steps.summary.outputs.total }} records"
+            git push
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard
+
+  deploy:
+    needs: scrape
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
