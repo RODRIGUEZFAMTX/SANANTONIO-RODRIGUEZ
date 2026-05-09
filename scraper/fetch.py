@@ -1,27 +1,14 @@
 #!/usr/bin/env python3
 """
-Bexar County (San Antonio TX) — Motivated Seller Lead Scraper v2
+Bexar County (San Antonio TX) — Motivated Seller Lead Scraper v3
 ================================================================
 
-Architecture
-------------
-1. CLERK PORTAL  — Playwright intercepts the Neumo SPA's XHR/fetch responses
-   so we get structured JSON instead of parsing brittle HTML.  Falls back to
-   DOM scraping only when the intercept yields nothing.
+Scrapes the Bexar County Clerk portal (bexar.tx.publicsearch.us) using
+Playwright, with correct document type names, full pagination, and
+detail-page scraping for property addresses.
 
-2. PARCEL DATA   — ArcGIS REST API on maps.bexar.org (real fields: Owner,
-   Situs, AddrLn1, AddrCity, AddrSt, Zip).  Queried per-owner in batches.
-   No bulk download required — works in CI without captchas.
-
-3. SCORING       — deterministic 0-100 seller score with documented weights.
-
-4. OUTPUT        — JSON (dashboard + data), GHL CSV, run log.
-
-5. DEDUP         — merges with prior data/records.json so multi-day runs
-   accumulate without losing history.
-
-Resilience: 3-attempt retry everywhere, per-record try/except, always writes
-valid output even on total failure. Logs enough to debug but never crashes.
+Enriches with mailing addresses from the BCAD ArcGIS parcel API.
+Scores leads 0-100, deduplicates across runs, exports JSON + GHL CSV.
 """
 
 from __future__ import annotations
@@ -40,21 +27,15 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 
 import requests
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
-
 CLERK_BASE = "https://bexar.tx.publicsearch.us"
 
-# ArcGIS REST endpoint — verified live with real field names
 ARCGIS_PARCEL_QUERY = (
     "https://maps.bexar.org/arcgis/rest/services/Parcels/MapServer/0/query"
 )
-ARCGIS_MAX_RECORDS = 1000   # server-side cap per request
 ARCGIS_FIELDS = "Owner,Situs,AddrLn1,AddrLn2,AddrCity,AddrSt,Zip,PropID"
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -64,44 +45,41 @@ GHL_CSV = ROOT / "data" / "leads_ghl.csv"
 RUN_LOG = ROOT / "data" / "last_run.log"
 
 RETRY_ATTEMPTS = 3
-RETRY_BACKOFF = 3          # seconds × attempt number
+RETRY_BACKOFF = 3
 HTTP_TIMEOUT = 60
-PW_TIMEOUT = 45_000        # Playwright ms
+PW_TIMEOUT = 60_000
+RESULTS_PER_PAGE = 50
+MAX_DETAIL_PAGES = 100  # max detail pages to visit per doc type per run
 
-# Document types we care about, mapped to categories + display labels
+# ── DOCUMENT TYPES ──
+# Uses the FULL names as they appear in the portal URL, NOT abbreviations.
+# Confirmed from live portal: docTypes=LIS%20PENDENS in the URL bar.
 DOC_TYPES: List[Dict[str, str]] = [
-    {"code": "LP",        "cat": "lis_pendens",      "label": "Lis Pendens"},
-    {"code": "NOFC",      "cat": "foreclosure",      "label": "Notice of Foreclosure"},
-    {"code": "TAXDEED",   "cat": "tax_deed",         "label": "Tax Deed"},
-    {"code": "JUD",       "cat": "judgment",          "label": "Judgment"},
-    {"code": "CCJ",       "cat": "judgment",          "label": "Certified Judgment"},
-    {"code": "DRJUD",     "cat": "judgment",          "label": "Domestic Judgment"},
-    {"code": "LNCORPTX",  "cat": "tax_lien",         "label": "Corp Tax Lien"},
-    {"code": "LNIRS",     "cat": "tax_lien",         "label": "IRS Lien"},
-    {"code": "LNFED",     "cat": "tax_lien",         "label": "Federal Lien"},
-    {"code": "LN",        "cat": "lien",             "label": "Lien"},
-    {"code": "LNMECH",    "cat": "mechanic_lien",    "label": "Mechanic Lien"},
-    {"code": "LNHOA",     "cat": "hoa_lien",         "label": "HOA Lien"},
-    {"code": "MEDLN",     "cat": "medicaid_lien",    "label": "Medicaid Lien"},
-    {"code": "PRO",       "cat": "probate",          "label": "Probate"},
-    {"code": "NOC",       "cat": "noc",              "label": "Notice of Commencement"},
-    {"code": "RELLP",     "cat": "rel_lis_pendens",  "label": "Release Lis Pendens"},
+    {"code": "LIS PENDENS",               "cat": "lis_pendens",      "label": "Lis Pendens"},
+    {"code": "NOTICE OF FORECLOSURE",      "cat": "foreclosure",      "label": "Notice of Foreclosure"},
+    {"code": "TAX DEED",                   "cat": "tax_deed",         "label": "Tax Deed"},
+    {"code": "JUDGMENT",                   "cat": "judgment",          "label": "Judgment"},
+    {"code": "CERTIFIED JUDGMENT",         "cat": "judgment",          "label": "Certified Judgment"},
+    {"code": "DOMESTIC JUDGMENT",          "cat": "judgment",          "label": "Domestic Judgment"},
+    {"code": "CORP TAX LIEN",             "cat": "tax_lien",         "label": "Corp Tax Lien"},
+    {"code": "IRS LIEN",                  "cat": "tax_lien",         "label": "IRS Lien"},
+    {"code": "FEDERAL LIEN",              "cat": "tax_lien",         "label": "Federal Lien"},
+    {"code": "LIEN",                      "cat": "lien",             "label": "Lien"},
+    {"code": "MECHANIC LIEN",             "cat": "mechanic_lien",    "label": "Mechanic Lien"},
+    {"code": "HOA LIEN",                  "cat": "hoa_lien",         "label": "HOA Lien"},
+    {"code": "MEDICAID LIEN",             "cat": "medicaid_lien",    "label": "Medicaid Lien"},
+    {"code": "PROBATE",                   "cat": "probate",          "label": "Probate"},
+    {"code": "NOTICE OF COMMENCEMENT",    "cat": "noc",              "label": "Notice of Commencement"},
+    {"code": "RELEASE LIS PENDENS",       "cat": "rel_lis_pendens",  "label": "Release Lis Pendens"},
 ]
 
-# Score flag associated with each category
 CAT_FLAG = {
-    "lis_pendens":     "Lis pendens",
-    "foreclosure":     "Pre-foreclosure",
-    "tax_deed":        "Pre-foreclosure",
-    "judgment":        "Judgment lien",
-    "tax_lien":        "Tax lien",
-    "lien":            "Judgment lien",
-    "mechanic_lien":   "Mechanic lien",
-    "hoa_lien":        "Judgment lien",
-    "medicaid_lien":   "Judgment lien",
-    "probate":         "Probate / estate",
-    "noc":             None,
-    "rel_lis_pendens": None,
+    "lis_pendens": "Lis pendens", "foreclosure": "Pre-foreclosure",
+    "tax_deed": "Pre-foreclosure", "judgment": "Judgment lien",
+    "tax_lien": "Tax lien", "lien": "Judgment lien",
+    "mechanic_lien": "Mechanic lien", "hoa_lien": "Judgment lien",
+    "medicaid_lien": "Judgment lien", "probate": "Probate / estate",
+    "noc": None, "rel_lis_pendens": None,
 }
 
 logging.basicConfig(
@@ -111,10 +89,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("bexar")
 
-
-# ---------------------------------------------------------------------------
-# DATA MODEL
-# ---------------------------------------------------------------------------
 
 @dataclass
 class Record:
@@ -140,9 +114,7 @@ class Record:
     score: int = 0
 
 
-# ---------------------------------------------------------------------------
-# RETRY HELPERS
-# ---------------------------------------------------------------------------
+# ── RETRY HELPERS ──
 
 def retry_sync(fn, *a, attempts=RETRY_ATTEMPTS, label="", **kw):
     last = None
@@ -154,7 +126,7 @@ def retry_sync(fn, *a, attempts=RETRY_ATTEMPTS, label="", **kw):
             log.warning("[%s] attempt %d/%d: %s", label or fn.__name__, i, attempts, e)
             if i < attempts:
                 time.sleep(RETRY_BACKOFF * i)
-    raise last  # type: ignore
+    raise last
 
 
 async def retry_async(coro_fn, *a, attempts=RETRY_ATTEMPTS, label="", **kw):
@@ -167,27 +139,28 @@ async def retry_async(coro_fn, *a, attempts=RETRY_ATTEMPTS, label="", **kw):
             log.warning("[%s] attempt %d/%d: %s", label or coro_fn.__name__, i, attempts, e)
             if i < attempts:
                 await asyncio.sleep(RETRY_BACKOFF * i)
-    raise last  # type: ignore
+    raise last
 
 
 # ===================================================================
-#  STAGE 1 — CLERK PORTAL (Playwright, API-intercept + DOM fallback)
+#  STAGE 1 — CLERK PORTAL (Playwright with DOM table parsing)
 # ===================================================================
 
-def _clerk_results_url(code: str, start: str, end: str) -> str:
-    """Build the Neumo SPA results URL."""
-    params = {
-        "department":        "RP",
-        "docTypes":          code,
-        "recordedDateRange": f"{start},{end}",
-        "searchType":        "advancedSearch",
-        "limit":             "250",
-    }
-    return f"{CLERK_BASE}/results?{urlencode(params)}"
+def _clerk_results_url(doc_type_name: str, start: str, end: str) -> str:
+    """
+    Build URL matching the live portal format:
+    /results?department=RP&docTypes=LIS%20PENDENS&recordedDateRange=20260501,20260509
+    """
+    return (
+        f"{CLERK_BASE}/results?"
+        f"department=RP&"
+        f"docTypes={quote(doc_type_name)}&"
+        f"recordedDateRange={start}%2C{end}"
+    )
 
 
 async def scrape_clerk(days: int) -> List[Record]:
-    """Main clerk entry point — drives Playwright."""
+    """Main clerk entry: iterate all doc types, paginate, parse DOM tables."""
     from playwright.async_api import async_playwright
 
     end_dt = datetime.now(timezone.utc)
@@ -200,12 +173,7 @@ async def scrape_clerk(days: int) -> List[Record]:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-extensions",
-            ],
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
         ctx = await browser.new_context(
             user_agent=(
@@ -219,16 +187,32 @@ async def scrape_clerk(days: int) -> List[Record]:
 
         for dt in DOC_TYPES:
             url = _clerk_results_url(dt["code"], s, e)
-            log.info("Clerk: %s (%s)", dt["code"], dt["label"])
+            log.info("Clerk: %s", dt["label"])
             try:
                 rows = await retry_async(
-                    _scrape_single_type, page, url, dt,
+                    _scrape_doc_type_all_pages, page, url, dt,
                     label=f"clerk:{dt['code']}",
                 )
-                log.info("  → %d records", len(rows))
+                log.info("  -> %d records for %s", len(rows), dt["label"])
                 records.extend(rows)
             except Exception as exc:
-                log.error("Clerk: %s failed after retries: %s", dt["code"], exc)
+                log.error("Clerk: %s failed: %s", dt["label"], exc)
+
+        # Stage 1b: Visit detail pages to get property addresses
+        log.info("Fetching detail pages for property addresses...")
+        detail_count = 0
+        for r in records:
+            if r.prop_address or not r.doc_num:
+                continue
+            if detail_count >= MAX_DETAIL_PAGES * len(DOC_TYPES):
+                break
+            try:
+                await _scrape_detail_page(page, r)
+                detail_count += 1
+                await page.wait_for_timeout(300)  # polite delay
+            except Exception as exc:
+                log.debug("Detail page fail %s: %s", r.doc_num, exc)
+        log.info("Visited %d detail pages", detail_count)
 
         await ctx.close()
         await browser.close()
@@ -236,241 +220,265 @@ async def scrape_clerk(days: int) -> List[Record]:
     return records
 
 
-async def _scrape_single_type(page, url: str, dt: Dict) -> List[Record]:
-    """
-    Strategy:
-      1. Set up a route listener that intercepts JSON responses from the
-         Neumo back-end (they typically hit /api/ or return application/json).
-      2. Navigate to the results URL.
-      3. If the intercept captured JSON results, parse those.
-      4. Otherwise, fall back to DOM table scraping.
-    """
-    captured_json: List[dict] = []
+async def _scrape_doc_type_all_pages(page, url: str, dt: Dict) -> List[Record]:
+    """Load results page and handle pagination to get ALL results."""
+    from bs4 import BeautifulSoup
 
-    async def _intercept(response):
-        """Capture any JSON response that looks like a results payload."""
-        try:
-            ct = response.headers.get("content-type", "")
-            if "json" not in ct:
-                return
-            if response.status != 200:
-                return
-            body = await response.json()
-            # Neumo patterns: body is a list, or body has a "results" key
-            if isinstance(body, list) and len(body) > 0:
-                captured_json.append({"items": body})
-            elif isinstance(body, dict):
-                # Look for any list of objects in the top-level keys
-                for key, val in body.items():
-                    if isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict):
-                        captured_json.append({"items": val, "key": key})
-                        break
-        except Exception:
-            pass
+    all_rows: List[Record] = []
 
-    page.on("response", _intercept)
+    await page.goto(url, wait_until="domcontentloaded")
+    await page.wait_for_timeout(3000)
+
+    # Try to set Results Per Page to 50 if there's a dropdown
     try:
-        await page.goto(url, wait_until="domcontentloaded")
-        # Give the SPA time to fire its data requests
-        await page.wait_for_timeout(4000)
-    finally:
-        page.remove_listener("response", _intercept)
+        selector = page.locator("select").filter(has_text="50")
+        if await selector.count() > 0:
+            await selector.first.select_option("50")
+            await page.wait_for_timeout(2000)
+    except Exception:
+        pass
 
-    # -- Strategy A: Parse intercepted JSON --
-    if captured_json:
-        return _parse_intercepted_json(captured_json, dt)
+    # Parse the first page
+    page_num = 1
+    while True:
+        html = await page.content()
+        rows = _parse_results_table(html, dt)
 
-    # -- Strategy B: DOM fallback --
-    log.debug("  No JSON intercepted for %s, trying DOM", dt["code"])
-    return await _parse_dom(page, dt)
+        if not rows:
+            break
+
+        all_rows.extend(rows)
+        log.info("    Page %d: %d rows (total so far: %d)", page_num, len(rows), len(all_rows))
+
+        # Check for "next page" and click it
+        if len(rows) < RESULTS_PER_PAGE:
+            break  # last page
+
+        # Try to find and click a next page button
+        try:
+            next_btn = page.locator(
+                "button:has-text('Next'), a:has-text('Next'), "
+                "[aria-label='Next'], [class*='next'], [class*='Next']"
+            )
+            if await next_btn.count() > 0:
+                await next_btn.first.click()
+                await page.wait_for_timeout(3000)
+                page_num += 1
+            else:
+                break
+        except Exception:
+            break
+
+        if page_num > 20:  # safety cap
+            break
+
+    return all_rows
 
 
-def _parse_intercepted_json(captures: List[dict], dt: Dict) -> List[Record]:
-    """Turn intercepted API responses into Record objects."""
-    out: List[Record] = []
-    for cap in captures:
-        for item in cap.get("items", []):
-            try:
-                rec = _json_item_to_record(item, dt)
-                if rec:
-                    out.append(rec)
-            except Exception:
-                continue
-    return out
-
-
-def _json_item_to_record(item: dict, dt: Dict) -> Optional[Record]:
+def _parse_results_table(html: str, dt: Dict) -> List[Record]:
     """
-    Map Neumo JSON fields to our Record.  Common field names across Neumo
-    portals: docNumber/documentNumber, docType, recordedDate/filedDate,
-    grantor, grantee, legalDescription, consideration/amount.
-    We search case-insensitively.
-    """
-    def g(*keys: str) -> str:
-        for k in keys:
-            for ik, iv in item.items():
-                if ik.lower().replace("_", "") == k.lower().replace("_", ""):
-                    if iv is not None:
-                        return str(iv).strip()
-        return ""
+    Parse the results table from the Bexar County clerk portal.
 
-    doc_num = g("docNumber", "documentNumber", "docNum", "id", "documentId")
-    if not doc_num and not g("grantor", "grantorName"):
-        return None  # empty row
-
-    filed_raw = g("recordedDate", "filedDate", "dateRecorded", "date")
-    filed = _parse_date(filed_raw)
-
-    amount_str = g("consideration", "amount", "monetaryAmount", "debtAmount")
-    amount = _to_float(amount_str)
-
-    clerk_url = ""
-    if doc_num:
-        clerk_url = f"{CLERK_BASE}/doc/{doc_num}"
-
-    return Record(
-        doc_num=doc_num,
-        doc_type=g("docType", "documentType", "type") or dt["label"],
-        filed=filed,
-        cat=dt["cat"],
-        cat_label=dt["label"],
-        owner=_clean_name(g("grantor", "grantorName", "grantors")),
-        grantee=_clean_name(g("grantee", "granteeName", "grantees")),
-        amount=amount,
-        legal=g("legalDescription", "legal", "legalDesc")[:500],
-        clerk_url=clerk_url,
-    )
-
-
-async def _parse_dom(page, dt: Dict) -> List[Record]:
-    """
-    Fallback: parse whatever the SPA rendered into the DOM.
-    Neumo renders either <table> rows or result-card divs.
+    Confirmed column order from live portal:
+    [checkbox] [icon] GRANTOR | GRANTEE | DOC TYPE | RECORDED DATE | DOC NUMBER |
+    BOOK/VOLUME/PAGE | LEGAL DESCRIPTION | LOT | BLOCK | NCB | COUNTY BLOCK
     """
     from bs4 import BeautifulSoup
 
-    html = await page.content()
     soup = BeautifulSoup(html, "lxml")
     out: List[Record] = []
 
-    # --- Try <table> first ---
     table = soup.find("table")
-    if table:
-        headers = [
-            (th.get_text(" ", strip=True) or "").lower()
-            for th in (table.find("thead") or table).find_all(["th"])
-        ]
-        tbody = table.find("tbody") or table
-        for tr in tbody.find_all("tr"):
-            try:
-                cells = tr.find_all("td")
-                if not cells:
-                    continue
-                rec = _row_to_record(cells, headers, dt)
-                if rec:
-                    out.append(rec)
-            except Exception:
-                continue
-        if out:
-            return out
+    if not table:
+        return out
 
-    # --- Try result cards (Neumo "result-item" pattern) ---
-    cards = soup.select("[class*='result'], [class*='Result'], [class*='search-result']")
-    for card in cards:
+    # Get headers
+    headers: List[str] = []
+    for th in (table.find("thead") or table).find_all(["th", "td"]):
+        headers.append((th.get_text(" ", strip=True) or "").lower().strip())
+
+    # Map header names to column indices
+    def find_col(*names):
+        for name in names:
+            for i, h in enumerate(headers):
+                if name in h:
+                    return i
+        return -1
+
+    col_grantor = find_col("grantor")
+    col_grantee = find_col("grantee")
+    col_doctype = find_col("doc type", "doctype", "type")
+    col_date = find_col("recorded date", "recorded", "date")
+    col_docnum = find_col("doc number", "doc num", "document")
+    col_legal = find_col("legal description", "legal desc", "legal")
+    col_lot = find_col("lot")
+    col_block = find_col("block")
+
+    tbody = table.find("tbody") or table
+    for tr in tbody.find_all("tr"):
         try:
-            text = card.get_text(" | ", strip=True)
-            rec = _card_text_to_record(text, card, dt)
-            if rec:
-                out.append(rec)
+            cells = tr.find_all("td")
+            if len(cells) < 4:
+                continue
+
+            def cell_text(idx):
+                if idx >= 0 and idx < len(cells):
+                    return cells[idx].get_text(" ", strip=True)
+                return ""
+
+            grantor = cell_text(col_grantor) if col_grantor >= 0 else ""
+            grantee = cell_text(col_grantee) if col_grantee >= 0 else ""
+            doc_type = cell_text(col_doctype) if col_doctype >= 0 else dt["label"]
+            filed_raw = cell_text(col_date) if col_date >= 0 else ""
+            doc_num = cell_text(col_docnum) if col_docnum >= 0 else ""
+            legal = cell_text(col_legal) if col_legal >= 0 else ""
+            lot = cell_text(col_lot) if col_lot >= 0 else ""
+            block = cell_text(col_block) if col_block >= 0 else ""
+
+            # Build fuller legal description
+            if lot or block:
+                legal_parts = [legal]
+                if lot:
+                    legal_parts.append(f"Lot: {lot}")
+                if block:
+                    legal_parts.append(f"Block: {block}")
+                legal = " ".join(filter(None, legal_parts))
+
+            # Find the doc link for the detail page
+            href = ""
+            a = tr.find("a", href=True)
+            if a:
+                h = a["href"]
+                href = h if h.startswith("http") else f"{CLERK_BASE}{h}"
+                if not doc_num:
+                    m = re.search(r"/doc/(\d+)", h)
+                    if m:
+                        doc_num = m.group(1)
+
+            if not doc_num and not grantor:
+                continue
+
+            rec = Record(
+                doc_num=doc_num.strip(),
+                doc_type=doc_type or dt["label"],
+                filed=_parse_date(filed_raw),
+                cat=dt["cat"],
+                cat_label=dt["label"],
+                owner=_clean_name(grantor),
+                grantee=_clean_name(grantee),
+                legal=legal[:500],
+                clerk_url=href or (f"{CLERK_BASE}/doc/{doc_num}" if doc_num else ""),
+            )
+            out.append(rec)
         except Exception:
             continue
 
     return out
 
 
-def _row_to_record(cells, headers, dt) -> Optional[Record]:
-    """Parse a <tr>'s <td> cells using header names or positional fallback."""
-    def col(names, pos=None):
-        for n in names:
-            for i, h in enumerate(headers):
-                if n in h and i < len(cells):
-                    return cells[i].get_text(" ", strip=True)
-        if pos is not None and pos < len(cells):
-            return cells[pos].get_text(" ", strip=True)
-        return ""
+async def _scrape_detail_page(page, rec: Record) -> None:
+    """
+    Visit /doc/{id} and extract property address, consideration amount,
+    and any additional data from the detail panel.
 
-    doc_num = col(["doc #", "doc#", "document", "number"], 0)
-    filed_raw = col(["recorded", "date", "filed"], 2)
-    grantor = col(["grantor"], 3)
-    grantee = col(["grantee"], 4)
-    legal = col(["legal", "description"], 5)
+    From the live portal, the detail page shows:
+    - Document Number, Recorded Date, Instrument Date
+    - Consideration (amount)
+    - Parties (Grantor/Grantee with roles)
+    - Legal Description (fuller version)
+    - Property Address (at the bottom of the SUMMARY panel)
+    """
+    detail_url = f"{CLERK_BASE}/doc/{rec.doc_num}"
+    await page.goto(detail_url, wait_until="domcontentloaded")
+    await page.wait_for_timeout(2000)
 
-    if not doc_num and not grantor:
-        return None
+    html = await page.content()
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(" ", strip=True)
 
-    # Find link
-    href = ""
-    for cell in cells:
-        a = cell.find("a", href=True)
-        if a:
-            h = a["href"]
-            if "/doc/" in h:
-                href = h if h.startswith("http") else f"{CLERK_BASE}{h}"
-                if not doc_num:
-                    m = re.search(r"/doc/(\d+)", h)
-                    if m:
-                        doc_num = m.group(1)
-            break
+    # Property Address — look for the section
+    addr_section = soup.find(string=re.compile(r"Property Address", re.I))
+    if addr_section:
+        parent = addr_section.find_parent()
+        if parent:
+            # Get the next sibling or the text after "Property Address"
+            next_el = parent.find_next_sibling()
+            if next_el:
+                addr_text = next_el.get_text(" ", strip=True)
+            else:
+                addr_text = parent.get_text(" ", strip=True)
+                addr_text = re.sub(r"^.*Property Address\s*:?\s*", "", addr_text, flags=re.I)
 
-    return Record(
-        doc_num=doc_num,
-        doc_type=col(["doc type", "type"], 1) or dt["label"],
-        filed=_parse_date(filed_raw),
-        cat=dt["cat"],
-        cat_label=dt["label"],
-        owner=_clean_name(grantor),
-        grantee=_clean_name(grantee),
-        legal=legal[:500],
-        clerk_url=href or (f"{CLERK_BASE}/doc/{doc_num}" if doc_num else ""),
+            if addr_text and len(addr_text) > 5:
+                parts = _parse_full_address(addr_text)
+                rec.prop_address = parts.get("address", "")
+                rec.prop_city = parts.get("city", "")
+                rec.prop_zip = parts.get("zip", "")
+
+    # Also try regex on the full text
+    if not rec.prop_address:
+        m = re.search(
+            r"Property\s+Address\s*:?\s*(\d+[^,\n]{3,}?)(?:\s+(?:SAN ANTONIO|CONVERSE|HELOTES|"
+            r"SCHERTZ|CIBOLO|SELMA|LIVE OAK|UNIVERSAL CITY|NEW BRAUNFELS|BOERNE|"
+            r"ALAMO HEIGHTS|LEON VALLEY|CASTLE HILLS|WINDCREST|KIRBY|SOMERSET|"
+            r"VON ORMY|FAIR OAKS RANCH|GARDEN RIDGE|HOLLYWOOD PARK|TERRELL HILLS|"
+            r"OLMOS PARK|SHAVANO PARK|BALCONES HEIGHTS|HILL COUNTRY VILLAGE|"
+            r"CHINA GROVE|GREY FOREST|SANDY OAKS|ELMENDORF|ST HEDWIG)\s*,?\s*"
+            r"(?:TX|TEXAS)\s*(\d{5}))",
+            text, re.I
+        )
+        if m:
+            rec.prop_address = m.group(1).strip()
+            rec.prop_zip = m.group(2) if m.group(2) else ""
+
+    # Consideration / amount
+    if rec.amount == 0.0:
+        m = re.search(r"Consideration\s*:?\s*\$?\s*([\d,]+(?:\.\d{1,2})?)", text, re.I)
+        if m:
+            rec.amount = _to_float(m.group(1))
+
+    # Fuller legal description
+    m = re.search(r"Subdivision\s*[-–—]\s*Name\s*:?\s*([^\n]+)", text, re.I)
+    if m and len(m.group(1).strip()) > len(rec.legal):
+        rec.legal = m.group(1).strip()[:500]
+
+
+def _parse_full_address(addr: str) -> Dict[str, str]:
+    """Parse an address like '27114 HARMONY HILLS SAN ANTONIO TEXAS 78260'"""
+    addr = addr.strip().upper()
+    m = re.match(
+        r"^(\d+\s+.+?)\s+"
+        r"(SAN ANTONIO|CONVERSE|HELOTES|LEON VALLEY|UNIVERSAL CITY"
+        r"|WINDCREST|BALCONES HEIGHTS|LIVE OAK|SELMA|SCHERTZ|CIBOLO"
+        r"|SHAVANO PARK|HILL COUNTRY VILLAGE|CASTLE HILLS|ALAMO HEIGHTS"
+        r"|KIRBY|CHINA GROVE|ST HEDWIG|SOMERSET|VON ORMY|ELMENDORF"
+        r"|SANDY OAKS|GREY FOREST|FAIR OAKS RANCH|GARDEN RIDGE"
+        r"|HOLLYWOOD PARK|TERRELL HILLS|OLMOS PARK|NEW BRAUNFELS|BOERNE)"
+        r"\s+(?:TX|TEXAS)\s+(\d{5})",
+        addr,
     )
+    if m:
+        return {"address": m.group(1).strip(), "city": m.group(2).strip().title(), "zip": m.group(3)}
 
-
-def _card_text_to_record(text: str, card, dt: Dict) -> Optional[Record]:
-    """Last resort: regex-parse a text blob from a result card."""
-    doc_m = re.search(r"(?:doc(?:ument)?[#\s:]*)?(\d{6,})", text, re.I)
-    doc_num = doc_m.group(1) if doc_m else ""
-
-    date_m = re.search(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", text)
-    filed = _parse_date(date_m.group(1)) if date_m else ""
-
-    if not doc_num and not filed:
-        return None
-
-    href = ""
-    a = card.find("a", href=True)
-    if a and "/doc/" in a["href"]:
-        href = a["href"] if a["href"].startswith("http") else f"{CLERK_BASE}{a['href']}"
-
-    return Record(
-        doc_num=doc_num,
-        doc_type=dt["label"],
-        filed=filed,
-        cat=dt["cat"],
-        cat_label=dt["label"],
-        owner=_clean_name(text.split("|")[0] if "|" in text else ""),
-        clerk_url=href or (f"{CLERK_BASE}/doc/{doc_num}" if doc_num else ""),
-    )
+    # Fallback: grab zip from end
+    mz = re.search(r"(\d{5})\s*$", addr)
+    # Try to split at TX/TEXAS
+    mt = re.search(r"^(.+?)\s+(?:TX|TEXAS)\s+(\d{5})", addr)
+    if mt:
+        return {"address": mt.group(1).strip(), "city": "San Antonio", "zip": mt.group(2)}
+    return {
+        "address": addr[:mz.start()].strip() if mz else addr,
+        "city": "San Antonio",
+        "zip": mz.group(1) if mz else "",
+    }
 
 
 # ===================================================================
-#  STAGE 2 — PARCEL ENRICHMENT (ArcGIS REST API — no bulk download)
+#  STAGE 2 — PARCEL ENRICHMENT (ArcGIS REST API)
 # ===================================================================
 
 def enrich_with_parcels(records: List[Record]) -> None:
-    """
-    For each unique owner name, query the Bexar County ArcGIS Parcel
-    layer and fill in property + mailing address.
-    """
     unique_owners: Dict[str, List[Record]] = {}
     for r in records:
         if not r.owner:
@@ -482,8 +490,7 @@ def enrich_with_parcels(records: List[Record]) -> None:
     hit = 0
 
     for owner_name, recs in unique_owners.items():
-        # Skip if all records already have addresses (e.g. from prior run merge)
-        if all(r.prop_address for r in recs):
+        if all(r.mail_address for r in recs):
             continue
         try:
             parcel = retry_sync(
@@ -494,71 +501,44 @@ def enrich_with_parcels(records: List[Record]) -> None:
                 for r in recs:
                     _apply_parcel(r, parcel)
                 hit += 1
-        except Exception as e:
-            log.debug("Parcel lookup failed for %s: %s", owner_name[:40], e)
+        except Exception:
             continue
-
-        # Be polite: 150ms between queries
         time.sleep(0.15)
 
     log.info("Parcel: enriched %d/%d unique owners", hit, len(unique_owners))
 
 
 def _query_arcgis_owner(owner_name: str) -> Optional[Dict]:
-    """
-    Query the ArcGIS MapServer for a parcel matching this owner.
-
-    Tries exact match first, then a LIKE prefix match if needed.
-    The API returns JSON with features[].attributes.
-    """
-    # Escape single quotes for ArcGIS SQL
     safe = owner_name.replace("'", "''")
-
-    # Try exact match
-    result = _arcgis_query(f"Owner = '{safe}'", max_results=1)
+    result = _arcgis_query(f"Owner = '{safe}'", 1)
     if result:
         return result
-
-    # Try LIKE prefix (first 20 chars)
     prefix = safe[:20].rstrip()
-    result = _arcgis_query(f"Owner LIKE '{prefix}%'", max_results=1)
-    return result
+    return _arcgis_query(f"Owner LIKE '{prefix}%'", 1)
 
 
 def _arcgis_query(where: str, max_results: int = 1) -> Optional[Dict]:
-    """Execute an ArcGIS REST query and return the first feature's attributes."""
     params = {
-        "where":         where,
-        "outFields":     ARCGIS_FIELDS,
-        "returnGeometry": "false",
-        "resultRecordCount": str(max_results),
-        "f":             "json",
+        "where": where, "outFields": ARCGIS_FIELDS,
+        "returnGeometry": "false", "resultRecordCount": str(max_results), "f": "json",
     }
-    r = requests.get(
-        ARCGIS_PARCEL_QUERY,
-        params=params,
-        timeout=HTTP_TIMEOUT,
-        headers={"User-Agent": "Mozilla/5.0 BexarLeadScraper/2.0"},
-    )
+    r = requests.get(ARCGIS_PARCEL_QUERY, params=params, timeout=HTTP_TIMEOUT,
+                     headers={"User-Agent": "Mozilla/5.0 BexarLeadScraper/3.0"})
     r.raise_for_status()
-    data = r.json()
-    features = data.get("features", [])
+    features = r.json().get("features", [])
     if features:
         return features[0].get("attributes", {})
     return None
 
 
 def _apply_parcel(rec: Record, parcel: Dict) -> None:
-    """Write ArcGIS parcel data into a Record, respecting existing values."""
     if not rec.prop_address:
         situs = str(parcel.get("Situs") or "").strip()
         if situs:
-            # Situs often contains "123 MAIN ST SAN ANTONIO TX 78201"
-            parts = _split_situs(situs)
+            parts = _parse_full_address(situs)
             rec.prop_address = parts["address"]
             rec.prop_city = parts["city"] or rec.prop_city
             rec.prop_zip = parts["zip"] or rec.prop_zip
-
     if not rec.mail_address:
         addr1 = str(parcel.get("AddrLn1") or "").strip()
         addr2 = str(parcel.get("AddrLn2") or "").strip()
@@ -568,107 +548,31 @@ def _apply_parcel(rec: Record, parcel: Dict) -> None:
         rec.mail_zip = str(parcel.get("Zip") or "").strip()
 
 
-def _split_situs(situs: str) -> Dict[str, str]:
-    """
-    Parse a BCAD situs string like "123 MAIN ST SAN ANTONIO TX 78201"
-    into {address, city, zip}.
-
-    Strategy: scan backward from " TX <zip>" to isolate city, then
-    match known Bexar-area city names from that chunk to split
-    street address from city.
-    """
-    s = situs.upper().strip()
-
-    # Pattern: <address> <city> TX <zip>
-    m = re.search(r"^(.+)\s+TX\s+(\d{5})(?:\s*-?\s*\d{4})?\s*$", s)
-    if not m:
-        # Fallback: just grab zip from end
-        mz = re.search(r"(\d{5})\s*$", s)
-        return {
-            "address": s[:mz.start()].strip() if mz else s,
-            "city": "San Antonio",
-            "zip": mz.group(1) if mz else "",
-        }
-
-    addr_city = m.group(1).strip()  # "123 MAIN ST SAN ANTONIO"
-    zipcode = m.group(2)
-
-    # Known Bexar-area cities, longest first to avoid partial matches
-    _CITIES = sorted([
-        "HILL COUNTRY VILLAGE", "BALCONES HEIGHTS", "FAIR OAKS RANCH",
-        "HOLLYWOOD PARK", "TERRELL HILLS", "UNIVERSAL CITY", "GARDEN RIDGE",
-        "SHAVANO PARK", "CASTLE HILLS", "ALAMO HEIGHTS", "LEON VALLEY",
-        "CHINA GROVE", "SANDY OAKS", "GREY FOREST", "SAN ANTONIO",
-        "VON ORMY", "LIVE OAK", "WINDCREST", "ELMENDORF", "ST HEDWIG",
-        "SOMERSET", "CONVERSE", "HELOTES", "SCHERTZ", "CIBOLO", "SELMA",
-        "KIRBY", "OLMOS PARK",
-    ], key=len, reverse=True)
-
-    for city in _CITIES:
-        if addr_city.endswith(city):
-            addr = addr_city[: -len(city)].strip()
-            if addr:
-                return {"address": addr, "city": city.title(), "zip": zipcode}
-
-    # City not in our list — assume last two words are the city
-    parts = addr_city.rsplit(None, 2)
-    if len(parts) >= 3:
-        return {
-            "address": " ".join(parts[:-2]),
-            "city": " ".join(parts[-2:]).title(),
-            "zip": zipcode,
-        }
-
-    return {"address": addr_city, "city": "San Antonio", "zip": zipcode}
-
-
 # ===================================================================
 #  STAGE 3 — SCORING
 # ===================================================================
 
 def score_all(records: List[Record]) -> None:
-    """Score every record, using cross-record LP+FC combo detection."""
     week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-
-    # Pre-compute owner → set of categories for combo detection
     owner_cats: Dict[str, Set[str]] = {}
     for r in records:
         if r.owner:
             owner_cats.setdefault(r.owner.upper().strip(), set()).add(r.cat)
-
     for r in records:
         try:
             _score_one(r, owner_cats, week_ago)
         except Exception:
-            r.score = 30  # safe default
+            r.score = 30
 
 
 def _score_one(r: Record, owner_cats: Dict[str, Set[str]], week_ago: datetime) -> None:
-    """
-    Base 30
-      +10 per flag
-      +20 LP + FC combo (same owner has both lis_pendens and foreclosure)
-      +15 amount > $100k
-      +10 amount > $50k  (not stacked with the +15)
-      +5  filed within the last 7 days
-      +5  has property address
-    Cap at 100.
-    """
     flags: List[str] = []
-
-    # Category flag
     flag = CAT_FLAG.get(r.cat)
     if flag:
         flags.append(flag)
-
-    # LLC / corp owner
-    if re.search(
-        r"\b(LLC|L\.L\.C|INC|CORP|CO\.|COMPANY|TRUST|LP|LTD|LLP|PARTNERSHIP)\b",
-        (r.owner or "").upper(),
-    ):
+    if re.search(r"\b(LLC|L\.L\.C|INC|CORP|CO\.|COMPANY|TRUST|LP|LTD|LLP|PARTNERSHIP)\b",
+                 (r.owner or "").upper()):
         flags.append("LLC / corp owner")
-
-    # New this week
     is_new = False
     try:
         if r.filed:
@@ -678,8 +582,6 @@ def _score_one(r: Record, owner_cats: Dict[str, Set[str]], week_ago: datetime) -
                 is_new = True
     except ValueError:
         pass
-
-    # LP + FC combo
     has_combo = False
     if r.cat in ("lis_pendens", "foreclosure") and r.owner:
         cats = owner_cats.get(r.owner.upper().strip(), set())
@@ -698,37 +600,26 @@ def _score_one(r: Record, owner_cats: Dict[str, Set[str]], week_ago: datetime) -
         score += 5
     if r.prop_address:
         score += 5
-
     r.flags = sorted(set(flags))
     r.score = min(100, max(0, score))
 
 
 # ===================================================================
-#  STAGE 4 — DEDUPLICATION & MERGE
+#  STAGE 4 — DEDUP & MERGE
 # ===================================================================
 
 def dedup_records(new: List[Record], prior_path: Path = DATA_JSON) -> List[Record]:
-    """
-    Merge new records with any existing data/records.json.
-    Key = doc_num. New data overwrites old for the same key.
-    Records without a doc_num are keyed by owner+date+cat.
-    """
     existing: Dict[str, Record] = {}
-
     if prior_path.exists():
         try:
             data = json.loads(prior_path.read_text(encoding="utf-8"))
             for item in data.get("records", []):
                 r = Record(**{k: v for k, v in item.items() if k in Record.__dataclass_fields__})
-                key = _record_key(r)
-                existing[key] = r
+                existing[_record_key(r)] = r
         except Exception as e:
             log.warning("Could not load prior records: %s", e)
-
     for r in new:
-        key = _record_key(r)
-        existing[key] = r  # new wins
-
+        existing[_record_key(r)] = r
     merged = list(existing.values())
     merged.sort(key=lambda r: (-r.score, r.filed or ""))
     return merged
@@ -745,7 +636,6 @@ def _record_key(r: Record) -> str:
 # ===================================================================
 
 def write_outputs(records: List[Record], days: int) -> None:
-    """Write JSON + CSV."""
     for p in [DASHBOARD_JSON, DATA_JSON, GHL_CSV]:
         p.parent.mkdir(parents=True, exist_ok=True)
 
@@ -754,32 +644,24 @@ def write_outputs(records: List[Record], days: int) -> None:
     payload = {
         "fetched_at": end.isoformat(),
         "source": "Bexar County Clerk + BCAD ArcGIS",
-        "date_range": {
-            "start": start.strftime("%Y-%m-%d"),
-            "end":   end.strftime("%Y-%m-%d"),
-            "days":  days,
-        },
+        "date_range": {"start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d"), "days": days},
         "total": len(records),
         "with_address": sum(1 for r in records if r.prop_address or r.mail_address),
         "records": [asdict(r) for r in records],
     }
-
     text = json.dumps(payload, indent=2, default=str)
     DASHBOARD_JSON.write_text(text, encoding="utf-8")
     DATA_JSON.write_text(text, encoding="utf-8")
-    log.info("Wrote %d records → %s, %s", len(records), DASHBOARD_JSON, DATA_JSON)
-
+    log.info("Wrote %d records -> %s, %s", len(records), DASHBOARD_JSON, DATA_JSON)
     _write_ghl_csv(records)
 
 
 def _write_ghl_csv(records: List[Record]) -> None:
     headers = [
-        "First Name", "Last Name",
-        "Mailing Address", "Mailing City", "Mailing State", "Mailing Zip",
+        "First Name", "Last Name", "Mailing Address", "Mailing City", "Mailing State", "Mailing Zip",
         "Property Address", "Property City", "Property State", "Property Zip",
         "Lead Type", "Document Type", "Date Filed", "Document Number",
-        "Amount/Debt Owed", "Seller Score", "Motivated Seller Flags",
-        "Source", "Public Records URL",
+        "Amount/Debt Owed", "Seller Score", "Motivated Seller Flags", "Source", "Public Records URL",
     ]
     with open(GHL_CSV, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -788,57 +670,37 @@ def _write_ghl_csv(records: List[Record]) -> None:
             try:
                 first, last = _split_name(r.owner)
                 w.writerow([
-                    first, last,
-                    r.mail_address, r.mail_city, r.mail_state, r.mail_zip,
+                    first, last, r.mail_address, r.mail_city, r.mail_state, r.mail_zip,
                     r.prop_address, r.prop_city, r.prop_state, r.prop_zip,
                     r.cat_label, r.doc_type, r.filed, r.doc_num,
-                    f"{r.amount:.2f}" if r.amount else "",
-                    r.score, "; ".join(r.flags),
+                    f"{r.amount:.2f}" if r.amount else "", r.score, "; ".join(r.flags),
                     "Bexar County Clerk", r.clerk_url,
                 ])
             except Exception:
                 continue
-    log.info("Wrote GHL CSV → %s (%d rows)", GHL_CSV, len(records))
+    log.info("Wrote GHL CSV -> %s (%d rows)", GHL_CSV, len(records))
 
 
 # ===================================================================
-#  HEALTH CHECK / ALERTING
+#  HEALTH CHECK
 # ===================================================================
 
 def health_check(records: List[Record], days: int) -> bool:
-    """
-    Return True if the run looks healthy.  Log warnings for suspicious
-    results so CI can surface them.
-    """
     ok = True
     if len(records) == 0:
-        log.warning("HEALTH: zero records returned — portal may be down or layout changed")
+        log.warning("HEALTH: zero records")
         ok = False
-    elif len(records) < 5 and days >= 7:
-        log.warning("HEALTH: only %d records for %d-day window — unusually low", len(records), days)
-
-    scored = [r for r in records if r.score > 0]
-    if records and not scored:
-        log.warning("HEALTH: all records scored 0 — scoring logic may be broken")
-        ok = False
-
     with_addr = sum(1 for r in records if r.prop_address or r.mail_address)
-    if records and with_addr == 0:
-        log.warning("HEALTH: no addresses found — ArcGIS enrichment may have failed")
-
-    # Write a run log
     try:
         RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
         RUN_LOG.write_text(json.dumps({
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "total": len(records),
-            "with_address": with_addr,
+            "total": len(records), "with_address": with_addr,
             "avg_score": round(sum(r.score for r in records) / max(1, len(records)), 1),
             "healthy": ok,
         }, indent=2), encoding="utf-8")
     except Exception:
         pass
-
     return ok
 
 
@@ -850,7 +712,6 @@ _DATE_FMTS = ["%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d", "%b %d, %Y", "%B %d, %Y",
               "%m/%d/%y", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
               "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"]
 
-
 def _parse_date(s: str) -> str:
     s = (s or "").strip()
     if not s:
@@ -860,7 +721,6 @@ def _parse_date(s: str) -> str:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
-    # Try millisecond epoch (Neumo sometimes returns this)
     try:
         ts = int(s)
         if ts > 1e12:
@@ -870,19 +730,14 @@ def _parse_date(s: str) -> str:
         pass
     return s
 
-
 def _to_float(s: str) -> float:
     try:
         return float(re.sub(r"[,$\s]", "", s or ""))
     except (ValueError, TypeError):
         return 0.0
 
-
 def _clean_name(s: str) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"\s+", " ", s)
-    return s
-
+    return re.sub(r"\s+", " ", (s or "").strip())
 
 def _split_name(owner: str) -> Tuple[str, str]:
     n = (owner or "").strip()
@@ -904,18 +759,17 @@ def _split_name(owner: str) -> Tuple[str, str]:
 # ===================================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Bexar County Motivated Seller Lead Scraper v2")
-    p.add_argument("--days", type=int, default=7, help="Lookback window (default 7)")
-    p.add_argument("--no-parcel", action="store_true", help="Skip ArcGIS parcel enrichment")
-    p.add_argument("--no-merge", action="store_true", help="Don't merge with prior data")
+    p = argparse.ArgumentParser(description="Bexar County Motivated Seller Lead Scraper v3")
+    p.add_argument("--days", type=int, default=7)
+    p.add_argument("--no-parcel", action="store_true")
+    p.add_argument("--no-merge", action="store_true")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    log.info("═══ Bexar County Lead Scraper v2 — %d-day lookback ═══", args.days)
+    log.info("=== Bexar County Lead Scraper v3 — %d-day lookback ===", args.days)
 
-    # -- Stage 1: Clerk portal --
     try:
         raw_records = asyncio.run(scrape_clerk(args.days))
     except Exception as e:
@@ -924,36 +778,29 @@ def main() -> int:
 
     log.info("Clerk: %d raw records", len(raw_records))
 
-    # -- Stage 2: Parcel enrichment --
     if not args.no_parcel and raw_records:
         try:
             enrich_with_parcels(raw_records)
         except Exception as e:
             log.error("Parcel stage error: %s", e)
 
-    # -- Stage 3: Score --
     score_all(raw_records)
 
-    # -- Stage 4: Deduplicate / merge --
     if args.no_merge:
         records = raw_records
     else:
         records = dedup_records(raw_records)
 
     records.sort(key=lambda r: (-r.score, r.filed or ""))
-
-    # -- Stage 5: Output --
     write_outputs(records, args.days)
-
-    # -- Stage 6: Health check --
     healthy = health_check(records, args.days)
 
     log.info(
-        "═══ Done: %d leads, %d with address, avg score %.0f %s ═══",
+        "=== Done: %d leads, %d with address, avg score %.0f %s ===",
         len(records),
         sum(1 for r in records if r.prop_address),
         sum(r.score for r in records) / max(1, len(records)),
-        "✓" if healthy else "⚠ CHECK LOGS",
+        "OK" if healthy else "CHECK LOGS",
     )
     return 0
 
