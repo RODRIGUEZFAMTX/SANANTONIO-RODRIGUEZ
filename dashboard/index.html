@@ -1,1 +1,174 @@
-file:///Users/deborahrodriguez/Downloads/index_1.html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>KYRO — Motivated Seller Leads</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+<style>
+:root{
+  --black:#000000;--dark:#08090b;--panel:#0e1014;--border:#1a1d24;
+  --white:#ffffff;--text:#e8ecf2;--muted:#6b7280;
+  --blue:#3478F6;--blue-dim:rgba(52,120,246,.12);--blue-glow:rgba(52,120,246,.25);
+  --green:#34d399;--yellow:#fbbf24;--red:#ef4444;
+  --radius:8px;
+}
+*{box-sizing:border-box;margin:0}
+body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;font-size:13px;line-height:1.45;
+     background:var(--black);color:var(--text);min-height:100vh}
+
+header{
+  padding:16px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  border-bottom:1px solid var(--border);background:var(--dark);
+}
+.logo{font-size:22px;font-weight:800;letter-spacing:4px;color:var(--white);display:flex;align-items:center}
+.logo .dot{display:inline-block;width:12px;height:12px;border-radius:50%;
+  background:var(--blue);box-shadow:0 0 8px var(--blue-glow);margin-left:-2px;margin-top:1px}
+.tagline{color:var(--muted);font-size:11px;font-weight:500;letter-spacing:.5px;text-transform:uppercase}
+.hdr-badges{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
+.badge{background:var(--panel);border:1px solid var(--border);padding:4px 10px;
+  border-radius:var(--radius);font-size:11px;color:var(--muted);font-weight:500}
+.badge b{color:var(--white);margin-right:3px}
+
+.controls{padding:12px 24px;display:flex;gap:8px;flex-wrap:wrap;
+  border-bottom:1px solid var(--border);background:var(--panel)}
+.controls input,.controls select{background:var(--dark);color:var(--text);border:1px solid var(--border);
+  padding:8px 12px;border-radius:var(--radius);font:inherit;font-size:12px;min-width:150px;transition:border-color .2s}
+.controls input:focus,.controls select:focus{outline:none;border-color:var(--blue)}
+.btn{background:var(--blue);border:none;color:var(--white);padding:8px 16px;
+  border-radius:var(--radius);cursor:pointer;font:inherit;font-weight:700;
+  font-size:12px;letter-spacing:.3px;transition:all .15s}
+.btn:hover{box-shadow:0 0 16px var(--blue-glow);transform:translateY(-1px)}
+
+.stats{display:flex;gap:20px;padding:10px 24px;flex-wrap:wrap;font-size:11px;color:var(--muted);
+  border-bottom:1px solid var(--border)}
+.stats b{color:var(--white);font-size:14px;margin-right:4px;font-weight:700}
+
+.wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+th{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;
+  color:var(--muted);background:var(--panel);position:sticky;top:0;cursor:pointer;user-select:none;transition:color .15s}
+th:hover,th.active{color:var(--blue)}
+tr:hover td{background:var(--panel)}
+
+.sc{display:inline-block;min-width:36px;text-align:center;padding:3px 8px;border-radius:6px;font-weight:800;font-size:12px}
+.sc.h{background:rgba(52,211,153,.12);color:var(--green)}
+.sc.m{background:rgba(251,191,36,.1);color:var(--yellow)}
+.sc.l{background:rgba(239,68,68,.1);color:var(--red)}
+
+.fl span{display:inline-block;background:var(--blue-dim);border:1px solid rgba(52,120,246,.2);
+  color:var(--blue);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;margin:1px 2px 1px 0}
+a{color:var(--blue);text-decoration:none;font-weight:600}
+a:hover{text-decoration:underline}
+.sub{font-size:10px;color:var(--muted);margin-top:1px}
+.empty{text-align:center;padding:60px 20px;color:var(--muted);font-size:14px}
+@media(max-width:768px){header{padding:12px 16px}.controls,.stats{padding:10px 16px}
+  th,td{padding:6px 8px;font-size:12px}.hdr-badges{margin-left:0}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">KYR<span class="dot"></span></div>
+  <span class="tagline">Motivated Seller Leads · Bexar County</span>
+  <div class="hdr-badges">
+    <span class="badge" id="hd-when">—</span>
+    <span class="badge" id="hd-range">—</span>
+    <span class="badge"><b id="hd-ct">0</b> leads</span>
+  </div>
+</header>
+<div class="controls">
+  <input id="q" type="search" placeholder="Search owner, address, doc #…"/>
+  <select id="fCat"><option value="">All lead types</option></select>
+  <select id="fScore"><option value="0">Any score</option><option value="50">Score ≥ 50</option><option value="70">Score ≥ 70</option><option value="85">Score ≥ 85</option></select>
+  <select id="fAddr"><option value="">Any</option><option value="1">Has address</option></select>
+  <button class="btn" id="btnCSV">⬇ Export CSV</button>
+</div>
+<div class="stats">
+  <span><b id="sN">0</b>shown</span>
+  <span><b id="sA">0</b>avg score</span>
+  <span><b id="sP">0</b>with address</span>
+  <span><b id="sW">0</b>new this week</span>
+</div>
+<div class="wrap">
+  <table><thead><tr>
+    <th data-k="score">Score</th><th data-k="filed">Filed</th><th data-k="cat_label">Type</th>
+    <th data-k="owner">Owner</th><th data-k="prop_address">Property</th>
+    <th data-k="mail_address">Mailing</th><th data-k="amount">Amount</th><th>Flags</th><th>Doc</th>
+  </tr></thead><tbody id="tb"></tbody></table>
+  <div class="empty" id="em" style="display:none">No matching leads. Try clearing your filters or wait for the next scraper run.</div>
+</div>
+<script>
+let D={records:[]},S={k:"score",d:-1};
+const $=s=>document.querySelector(s),
+  esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])),
+  money=n=>n?"$"+Number(n).toLocaleString(undefined,{maximumFractionDigits:0}):"",
+  scCls=s=>s>=70?"h":s>=50?"m":"l";
+async function boot(){
+  try{const r=await fetch("records.json?_="+Date.now());D=await r.json()}catch(e){D={records:[]}}
+  $("#hd-when").textContent=D.fetched_at?"Updated "+new Date(D.fetched_at).toLocaleString():"Awaiting first run";
+  $("#hd-range").textContent=D.date_range?.start?`${D.date_range.start} → ${D.date_range.end}`:"—";
+  $("#hd-ct").textContent=D.total||0;
+  const cats=[...new Set((D.records||[]).map(r=>r.cat_label).filter(Boolean))].sort();
+  cats.forEach(c=>{const o=document.createElement("option");o.value=c;o.textContent=c;$("#fCat").appendChild(o)});
+  render()
+}
+function filtered(){
+  const q=$("#q").value.toLowerCase(),cat=$("#fCat").value,ms=+$("#fScore").value,ha=$("#fAddr").value;
+  return(D.records||[]).filter(r=>{
+    if(cat&&r.cat_label!==cat)return false;if(r.score<ms)return false;
+    if(ha==="1"&&!r.prop_address&&!r.mail_address)return false;
+    if(q&&!`${r.owner} ${r.prop_address} ${r.mail_address} ${r.doc_num} ${r.legal}`.toLowerCase().includes(q))return false;
+    return true
+  }).sort((a,b)=>{
+    const va=a[S.k]??"",vb=b[S.k]??"";
+    return(typeof va==="number"&&typeof vb==="number"?va-vb:String(va).localeCompare(String(vb)))*S.d
+  })
+}
+function render(){
+  const rows=filtered(),tb=$("#tb");tb.innerHTML="";
+  $("#em").style.display=rows.length?"none":"block";
+  $("#sN").textContent=rows.length;
+  $("#sA").textContent=rows.length?Math.round(rows.reduce((a,r)=>a+(r.score||0),0)/rows.length):0;
+  $("#sP").textContent=rows.filter(r=>r.prop_address||r.mail_address).length;
+  $("#sW").textContent=rows.filter(r=>(r.flags||[]).includes("New this week")).length;
+  const f=document.createDocumentFragment();
+  for(const r of rows){const tr=document.createElement("tr");
+    tr.innerHTML=`<td><span class="sc ${scCls(r.score)}">${r.score}</span></td>
+      <td>${r.filed||""}</td>
+      <td>${esc(r.cat_label)}<div class="sub">${esc(r.doc_type)}</div></td>
+      <td>${esc(r.owner)}</td>
+      <td>${esc(r.prop_address)}<div class="sub">${esc([r.prop_city,r.prop_state,r.prop_zip].filter(Boolean).join(" "))}</div></td>
+      <td>${esc(r.mail_address)}<div class="sub">${esc([r.mail_city,r.mail_state,r.mail_zip].filter(Boolean).join(" "))}</div></td>
+      <td>${money(r.amount)}</td>
+      <td class="fl">${(r.flags||[]).map(f=>`<span>${esc(f)}</span>`).join("")}</td>
+      <td>${r.clerk_url?`<a href="${r.clerk_url}" target="_blank">${r.doc_num||"view"}</a>`:(r.doc_num||"")}</td>`;
+    f.appendChild(tr)}
+  tb.appendChild(f);
+  document.querySelectorAll("th[data-k]").forEach(th=>th.classList.toggle("active",th.dataset.k===S.k))
+}
+document.querySelectorAll("th[data-k]").forEach(th=>th.addEventListener("click",()=>{
+  const k=th.dataset.k;S={k,d:S.k===k?-S.d:-1};render()
+}));
+["q","fCat","fScore","fAddr"].forEach(id=>$("#"+id).addEventListener("input",render));
+$("#btnCSV").addEventListener("click",()=>{
+  const rows=filtered(),
+    hdr=["First Name","Last Name","Mailing Address","Mailing City","Mailing State","Mailing Zip","Property Address","Property City","Property State","Property Zip","Lead Type","Document Type","Date Filed","Document Number","Amount/Debt Owed","Seller Score","Motivated Seller Flags","Source","Public Records URL"],
+    lines=[hdr.join(",")];
+  for(const r of rows){const o=(r.owner||"").trim();let fn="",ln=o;
+    if(/\b(LLC|INC|CORP|TRUST|LTD|LLP)\b/i.test(o)){fn="";ln=o}
+    else if(o.includes(",")){const[l,f]=o.split(",").map(s=>s.trim());fn=f;ln=l}
+    else{const p=o.split(/\s+/);if(p.length>1){ln=p.pop();fn=p.join(" ")}}
+    const c=[fn,ln,r.mail_address,r.mail_city,r.mail_state,r.mail_zip,
+      r.prop_address,r.prop_city,r.prop_state,r.prop_zip,r.cat_label,r.doc_type,r.filed,r.doc_num,
+      r.amount?r.amount.toFixed(2):"",r.score,(r.flags||[]).join("; "),"Bexar County Clerk",r.clerk_url||""];
+    lines.push(c.map(v=>`"${String(v??"").replace(/"/g,'""')}"`).join(","))}
+  const b=new Blob([lines.join("\n")],{type:"text/csv"}),a=document.createElement("a");
+  a.href=URL.createObjectURL(b);a.download=`kyro_leads_${new Date().toISOString().slice(0,10)}.csv`;a.click()
+});
+boot()
+</script>
+</body>
+</html>
