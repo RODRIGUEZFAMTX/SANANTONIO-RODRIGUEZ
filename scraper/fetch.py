@@ -49,7 +49,8 @@ RETRY_BACKOFF = 3
 HTTP_TIMEOUT = 60
 PW_TIMEOUT = 60_000
 RESULTS_PER_PAGE = 50
-MAX_DETAIL_PAGES = 100  # max detail pages to visit per doc type per run
+MAX_DETAIL_PAGES = 200  # total detail pages across ALL doc types per run
+DETAIL_TIME_BUDGET = 900  # seconds (15 min) max for detail page scraping
 
 # ── DOCUMENT TYPES ──
 # Uses the FULL names as they appear in the portal URL, NOT abbreviations.
@@ -199,20 +200,27 @@ async def scrape_clerk(days: int) -> List[Record]:
                 log.error("Clerk: %s failed: %s", dt["label"], exc)
 
         # Stage 1b: Visit detail pages to get property addresses
+        # Prioritize records without addresses, cap by count AND time
         log.info("Fetching detail pages for property addresses...")
         detail_count = 0
-        for r in records:
-            if r.prop_address or not r.doc_num:
-                continue
-            if detail_count >= MAX_DETAIL_PAGES * len(DOC_TYPES):
+        detail_start = time.time()
+        needs_detail = [r for r in records if not r.prop_address and r.doc_num]
+        for r in needs_detail:
+            if detail_count >= MAX_DETAIL_PAGES:
+                log.info("Hit detail page cap (%d)", MAX_DETAIL_PAGES)
+                break
+            if time.time() - detail_start > DETAIL_TIME_BUDGET:
+                log.info("Hit detail time budget (%ds)", DETAIL_TIME_BUDGET)
                 break
             try:
                 await _scrape_detail_page(page, r)
                 detail_count += 1
-                await page.wait_for_timeout(300)  # polite delay
+                if detail_count % 25 == 0:
+                    log.info("  ...%d detail pages done", detail_count)
+                await page.wait_for_timeout(500)
             except Exception as exc:
                 log.debug("Detail page fail %s: %s", r.doc_num, exc)
-        log.info("Visited %d detail pages", detail_count)
+        log.info("Visited %d detail pages in %.0fs", detail_count, time.time() - detail_start)
 
         await ctx.close()
         await browser.close()
