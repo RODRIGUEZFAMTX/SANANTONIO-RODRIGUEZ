@@ -1,7 +1,7 @@
 {
-  "run_at": "2026-05-11T02:07:14.941290+00:00",
+  "run_at": "2026-05-11T03:09:07.842902+00:00",
   "lookback_days": 7,
-  "total_kept": 0,
+  "total_kept": 200,
   "searches": [
     {
       "search_label": "Notice of Foreclosure",
@@ -10,7 +10,7 @@
       "tier": "S",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 150,
+      "records_found": 100,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -34,7 +34,7 @@
       "tier": "S",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 150,
+      "records_found": 200,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -82,7 +82,7 @@
       "tier": "S",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 100,
+      "records_found": 200,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -94,7 +94,7 @@
       "tier": "S",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 200,
+      "records_found": 150,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -142,7 +142,7 @@
       "tier": "A",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 200,
+      "records_found": 150,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -166,7 +166,7 @@
       "tier": "A",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 200,
+      "records_found": 150,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -178,7 +178,7 @@
       "tier": "A",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 100,
+      "records_found": 150,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -190,7 +190,7 @@
       "tier": "A",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 200,
+      "records_found": 50,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -202,7 +202,7 @@
       "tier": "A",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 150,
+      "records_found": 200,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -214,7 +214,7 @@
       "tier": "A",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 200,
+      "records_found": 100,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -226,7 +226,7 @@
       "tier": "A",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 200,
+      "records_found": 100,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -250,7 +250,7 @@
       "tier": "A",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 100,
+      "records_found": 150,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -274,7 +274,7 @@
       "tier": "B",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 100,
+      "records_found": 200,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -298,7 +298,7 @@
       "tier": "B",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 200,
+      "records_found": 150,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -310,7 +310,7 @@
       "tier": "B",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 150,
+      "records_found": 100,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -334,7 +334,7 @@
       "tier": "B",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 150,
+      "records_found": 200,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -382,7 +382,7 @@
       "tier": "C",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 100,
+      "records_found": 200,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []
@@ -394,7 +394,7 @@
       "tier": "C",
       "chunks_run": 4,
       "chunks_failed": 0,
-      "records_found": 200,
+      "records_found": 150,
       "api_intercepts": 0,
       "html_fallbacks": 4,
       "errors": []

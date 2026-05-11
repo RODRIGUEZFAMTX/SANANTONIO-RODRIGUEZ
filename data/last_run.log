@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-05-11T02:07:14.943214+00:00",
-  "total": 0,
-  "with_address": 0,
-  "avg_score": 0.0,
+  "timestamp": "2026-05-11T03:09:07.853430+00:00",
+  "total": 200,
+  "with_address": 200,
+  "avg_score": 35.0,
   "hot_leads": 0,
-  "healthy": false,
+  "healthy": true,
   "zero_result_searches": [
     "Eminent Domain"
   ],
