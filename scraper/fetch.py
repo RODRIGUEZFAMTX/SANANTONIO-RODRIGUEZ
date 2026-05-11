@@ -903,37 +903,74 @@ def _score(r: Rec, oc: Dict, week: datetime) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 def stage_filter_complete(recs: List[Rec], days: int) -> List[Rec]:
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    """
+    Drop records that won't be useful as leads.
+
+    NOTE: We do NOT filter by date here. The portal already filters
+    server-side via the recordedDateRange URL parameter. If we filter
+    again on the client side, we risk dropping records that have date
+    format quirks (e.g. instrumentDate vs recordedDate vs filed).
+
+    Trust the portal's date filter. Only enforce QUALITY filters here:
+      - Must have a doc_num OR owner (we need SOMETHING to identify the record)
+      - Must hit min completeness (enough fields to be useful)
+      - Tier S leads should ideally have an address (warn but don't drop)
+    """
     out: List[Rec] = []
-    drops = {"old": 0, "incomplete": 0, "tier_s_no_addr": 0, "no_doc_num": 0}
+    drops = {"no_identity": 0, "incomplete": 0}
+    warn_no_addr = 0
+
     for r in recs:
-        if not r.doc_num and not r.owner:
-            drops["no_doc_num"] += 1; continue
-        if r.filed and r.filed < cutoff:
-            drops["old"] += 1; continue
+        # Must have SOMETHING that identifies the record
+        if not r.doc_num and not r.owner and not r.prop_address:
+            drops["no_identity"] += 1
+            continue
+        # Skip ultra-incomplete records (no doc type, no filed date, no owner...)
         if r.completeness < MIN_COMPLETENESS_SCORE:
-            drops["incomplete"] += 1; continue
-        if TIER_S_REQUIRES_ADDRESS and r.tier == "S" and not (r.prop_address or r.mail_address):
-            drops["tier_s_no_addr"] += 1; continue
+            drops["incomplete"] += 1
+            continue
+        # Tier S with no address — warn but KEEP (we still want the lead)
+        if r.tier == "S" and not (r.prop_address or r.mail_address):
+            warn_no_addr += 1
         out.append(r)
 
-    log.info("FILTER: kept %d / dropped %d (%s)",
+    log.info("FILTER: kept %d / dropped %d (no_identity=%d, incomplete=%d)",
              len(out), sum(drops.values()),
-             ", ".join(f"{k}={v}" for k,v in drops.items() if v))
+             drops["no_identity"], drops["incomplete"])
+    if warn_no_addr:
+        log.warning("FILTER: %d Tier S records lack addresses — will try BCAD enrichment",
+                    warn_no_addr)
     return out
 
 
 def stage_dedup(new: List[Rec], days: int) -> List[Rec]:
-    """Merge with prior data, hard-cutoff anything outside lookback window."""
+    """
+    Merge with prior data. Keeps records up to 90 days back so the
+    dashboard shows a useful rolling window even if the daily run is small.
+    """
     old: Dict[str, Rec] = {}
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    # Hard floor: drop records older than 90 days regardless of what they were
+    # (prevents the dashboard from holding stale 2023 records forever)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
+
     if OUT_DATA.exists():
         try:
-            for item in json.loads(OUT_DATA.read_text())["records"]:
-                r = Rec(**{k: v for k, v in item.items() if k in Rec.__dataclass_fields__})
-                if r.filed and r.filed < cutoff: continue
-                old[_key(r)] = r
-        except: pass
+            prior = json.loads(OUT_DATA.read_text())
+            for item in prior.get("records", []):
+                try:
+                    valid_keys = set(Rec.__dataclass_fields__.keys())
+                    clean_item = {k: v for k, v in item.items() if k in valid_keys}
+                    r = Rec(**clean_item)
+                    # Hard floor at 90 days — prevents ancient records lingering
+                    if r.filed and r.filed < cutoff: continue
+                    old[_key(r)] = r
+                except Exception as e:
+                    log.debug("Skipping malformed prior record: %s", e)
+                    continue
+            log.info("DEDUP: loaded %d prior records (90-day rolling window)", len(old))
+        except Exception as e:
+            log.warning("DEDUP: couldn't load prior data (%s) — starting fresh", e)
+
     for r in new: old[_key(r)] = r
     out = list(old.values())
     out.sort(key=lambda r: (-r.score, r.filed or ""))
@@ -1195,14 +1232,41 @@ def main() -> int:
     # Allow override via flag
     CHUNK_DAYS = args.chunk_days
 
-    log.info("══════ BEXAR COUNTY LEAD SCRAPER v8 — MASTER MODE ══════")
-    log.info("Lookback: %d days | Chunk: %d days | Searches: %d",
-             args.days, args.chunk_days, len(SEARCHES))
-    log.info("Tier S: %d | Tier A: %d | Tier B: %d | Tier C: %d",
+    # Early environment diagnostics — helps debug fast failures
+    log.info("══════ BEXAR COUNTY LEAD SCRAPER v9 — MASTER MODE ══════")
+    log.info("Python: %s", sys.version.split()[0])
+    log.info("CWD: %s", os.getcwd())
+    log.info("Script: %s", __file__)
+    log.info("ROOT: %s (exists=%s)", ROOT, ROOT.exists())
+    log.info("Args: days=%d chunk=%d no_parcel=%s no_merge=%s no_alerts=%s allow_incomplete=%s",
+             args.days, args.chunk_days, args.no_parcel, args.no_merge,
+             args.no_alerts, args.allow_incomplete)
+    log.info("Env: BEXAR_EMAIL=%s BEXAR_PASSWORD=%s TG_TOKEN=%s TG_CHAT=%s",
+             "SET" if os.environ.get("BEXAR_EMAIL") else "MISSING",
+             "SET" if os.environ.get("BEXAR_PASSWORD") else "MISSING",
+             "SET" if TG_TOKEN else "MISSING",
+             "SET" if TG_CHAT else "MISSING")
+    log.info("Searches: %d (S=%d A=%d B=%d C=%d)", len(SEARCHES),
              sum(1 for s in SEARCHES if s["tier"] == "S"),
              sum(1 for s in SEARCHES if s["tier"] == "A"),
              sum(1 for s in SEARCHES if s["tier"] == "B"),
              sum(1 for s in SEARCHES if s["tier"] == "C"))
+
+    # Try to import playwright BEFORE doing anything else
+    try:
+        from playwright.async_api import async_playwright  # noqa
+        log.info("✅ playwright module available")
+    except ImportError as e:
+        log.error("❌ playwright not installed: %s", e)
+        log.error("   Install with: pip install playwright && playwright install chromium")
+        return 2
+
+    try:
+        from bs4 import BeautifulSoup  # noqa
+        log.info("✅ beautifulsoup4 module available")
+    except ImportError as e:
+        log.error("❌ beautifulsoup4 not installed: %s", e)
+        return 2
 
     audits: List[SearchAudit] = []
 
@@ -1257,4 +1321,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as e:
+        log.error("═══════════════════════════════════════════")
+        log.error("FATAL ERROR — scraper crashed at top level:")
+        log.error("  %s: %s", type(e).__name__, e)
+        log.error("═══════════════════════════════════════════")
+        log.error("Traceback:\n%s", traceback.format_exc())
+        sys.exit(2)
