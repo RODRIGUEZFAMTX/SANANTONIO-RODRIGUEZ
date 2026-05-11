@@ -1,7 +1,12 @@
 {
-  "timestamp": "2026-05-09T17:45:02.009431+00:00",
-  "total": 88,
-  "with_address": 26,
-  "avg_score": 36.6,
-  "healthy": true
+  "timestamp": "2026-05-11T02:07:14.943214+00:00",
+  "total": 0,
+  "with_address": 0,
+  "avg_score": 0.0,
+  "hot_leads": 0,
+  "healthy": false,
+  "zero_result_searches": [
+    "Eminent Domain"
+  ],
+  "failed_chunks": 0
 }
