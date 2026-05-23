@@ -1,5 +1,5 @@
 {
-  "fetched_at": "2026-05-22T15:19:58.228636+00:00",
+  "fetched_at": "2026-05-23T14:59:26.331662+00:00",
   "version": "v10",
   "searches": [
     {
@@ -13,8 +13,8 @@
       "records_dropped_validation": 0,
       "records_dropped_bot": 0,
       "api_intercepts": 0,
-      "html_fallbacks": 0,
-      "bot_challenges_detected": 21,
+      "html_fallbacks": 7,
+      "bot_challenges_detected": 0,
       "pagination_max_page": 1,
       "errors": []
     },
@@ -618,8 +618,8 @@
   "totals": {
     "records": 0,
     "api_intercepts": 0,
-    "html_fallbacks": 259,
-    "bot_challenges": 21,
+    "html_fallbacks": 266,
+    "bot_challenges": 0,
     "validation_drops": 0,
     "bot_drops": 0
   }
