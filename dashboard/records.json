@@ -1,10 +1,10 @@
 {
-  "fetched_at": "2026-11-15T19:07:07.491722+00:00",
+  "fetched_at": "2026-11-16T22:16:44.196300+00:00",
   "version": "v10",
   "source": "Bexar County Clerk + BCAD ArcGIS",
   "date_range": {
-    "start": "2026-11-01",
-    "end": "2026-11-15",
+    "start": "2026-11-02",
+    "end": "2026-11-16",
     "days": 14
   },
   "total": 0,
